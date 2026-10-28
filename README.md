@@ -1,5 +1,7 @@
 # open-yoki
 
+可选的真人脸试播接入：[Simli 配置与 OBS 说明](docs/simli.md)。
+
 [English](README.en.md)
 
 一台服务器就能跑的 AI 直播主播。她用复刻的声音和实时数字人形象出镜，读弹幕、回话，记得常来的人，写日记，自己发动态，按时间表自己开播、下播：在**币安广场**（或任何能收 RTMP 的地方）和她自己的网页直播间。
@@ -88,6 +90,10 @@ IDOL=example AVATAR=mock MODE=test node server/index.mjs
 打开 http://127.0.0.1:4370 。没有钥匙时大脑和声音是关的，形象是静态图，只能确认程序和主播配置能加载。填上 `OPENROUTER_API_KEY` 和 `VOLC_API_KEY` + `DOUBAO_VOICE_ID` 就能听到她说话。
 
 ## 做你自己的主播
+
+可选的低成本本机方案：用 **Codex CLI** 生成回复，用 **Live2D** 绘制形象，再由 OBS 推流。
+两个模块独立启用，原有 OpenRouter / Vidu 配置仍可使用。安装、模型授权和配置见
+[本机 Codex 与 Live2D 接入](docs/local-providers.md)。
 
 1. `cp -r app/idols/example app/idols/<id>`，把里面 `config.mjs` 的 `id` 改成 `<id>`。
 2. 按本人的回答填 `profile.mjs`（她是谁、怎么说话、几句原话），再填 `config.mjs` 里的 `PLACES`（广场名字、X 账号、网站、直播时间）。

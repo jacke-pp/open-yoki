@@ -4,6 +4,8 @@
 // all come from snapshot.idol.
 import { watchRoom } from './feed.js';
 import { t, lang, setLang, setVars, applyStatic } from './i18n.js';
+import { createLive2DView } from './live2d.js';
+import { createSimliView } from './simli.js';
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -16,17 +18,83 @@ let token = localStorage.getItem(S + 'token'), me = null;
 // ---------- picture ----------
 const player = new Audio();
 const songPlayer = new Audio();   // a song she put on ([放歌]), quiet under her voice
+const capture = new URLSearchParams(location.search);
+document.body.classList.toggle('obs', capture.get('obs') === '1');
+document.body.classList.toggle('landscape', capture.get('landscape') === '1');
+const live2d = createLive2DView({
+  container: $('live2dView'), audio: player,
+  onReady: ready => {
+    $('still').hidden = ready || !stillOk;
+    $('placeholder').hidden = ready || stillOk;
+    if (ready) $('live2dError').hidden = true;
+  },
+  onError: error => {
+    console.warn('local avatar', error?.message || error);
+    if (room?.avatar?.kind === 'live2d' && !live2d.ready) {
+      $('live2dError').textContent = t('角色加载失败，暂用静态画面');
+      $('live2dError').hidden = false;
+    }
+  },
+});
+let simliState = null;
+function renderSimliState(state = simliState) {
+  if (!state) return;
+  const enabled = room?.avatar?.kind === 'simli';
+  $('simliControls').hidden = !enabled;
+  document.body.classList.toggle('simli-enabled', enabled);
+  document.body.classList.toggle('simli-connected', enabled && state.ready);
+  if (!enabled) return;
+  const configured = !!room.avatar.simli?.configured;
+  const seconds = Math.min(3600, Math.max(60, Number(room.avatar.simli?.maxSessionLength) || 120));
+  $('simliNote').textContent = !state.local ? t('仅可在这台电脑的本地页面连接真人形象。')
+    : !configured ? t('真人形象尚未配置。') : t('连接后开始计费，单次试播最多 {seconds} 秒；切换页面会断开。', { seconds });
+  $('simliConnect').disabled = !state.available || state.state === 'connecting' || state.ready;
+  $('simliDisconnect').disabled = state.state !== 'connecting' && !state.ready;
+  const status = { idle: '未连接，显示静态画面和字幕。', connecting: '真人形象连接中…',
+    connected: '真人形象已连接', expired: '试播已结束，可手动重新连接。', error: '真人形象连接失败，已断开；可手动重试。' };
+  $('simliStatus').textContent = t(!room.onAir?.onAir ? '下播后已断开真人形象。' : status[state.state] || status.idle);
+  $('simliStatus').title = state.error || '';
+  $('still').hidden = state.ready || !stillOk;
+  $('placeholder').hidden = state.ready || stillOk;
+}
+const simli = createSimliView({ video: $('simliVideo'), audio: $('simliAudio'), onState: state => {
+  simliState = state;
+  renderSimliState(state);
+} });
+$('simliConnect').onclick = () => { player.pause(); songPlayer.pause(); void simli.connect(); };
+$('simliDisconnect').onclick = () => { void simli.disconnect(); };
 let hls = null, volc = null;
 const video = () => $('liveVideo');
-const liveShown = () => !video().hidden || !!volc?.up;
+const liveShown = () => !video().hidden || !!volc?.up || simli.ready;
 // Her still picture is optional (public/art/<id>/looks/s1.jpg, added by whoever runs her); until it loads, or if it
 // is missing, a neutral placeholder stands in.
 let stillOk = false;
-$('still').onload = () => { stillOk = true; $('placeholder').hidden = true; if (!liveShown()) $('still').hidden = false; };
-$('still').onerror = () => { stillOk = false; $('still').hidden = true; $('placeholder').hidden = false; };
+$('still').onload = () => { stillOk = true; $('placeholder').hidden = true; if (!liveShown() && !live2d.ready) $('still').hidden = false; };
+$('still').onerror = () => { stillOk = false; $('still').hidden = true; $('placeholder').hidden = live2d.ready || simli.ready; };
 function setView(view) {
   const img = $('still');
   if (view?.src && img.getAttribute('src') !== view.src) { stillOk = false; img.src = view.src; }
+  simli.setView(view, !!room?.onAir?.onAir);
+  renderSimliState();
+  if (view?.kind === 'simli') {
+    stopVolc(); stopLive(); live2d.setView(null);
+    $('rtc').hidden = true; $('live2dError').hidden = true; $('live2dCredit').hidden = true;
+    player.pause(); songPlayer.pause();
+    img.hidden = simli.ready || !stillOk;
+    $('placeholder').hidden = simli.ready || stillOk;
+    return;
+  }
+  if (view?.kind === 'live2d') {
+    stopVolc(); stopLive(); $('rtc').hidden = true;
+    $('live2dCredit').textContent = view.live2d?.credit || '';
+    $('live2dCredit').hidden = !view.live2d?.credit;
+    img.hidden = live2d.ready || !stillOk;
+    $('placeholder').hidden = live2d.ready || stillOk;
+    live2d.setView(view);
+    if (sound) live2d.resumeAudio().catch(error => console.warn('avatar audio', error?.message || error));
+    return;
+  }
+  live2d.setView(null); $('live2dError').hidden = true; $('live2dCredit').hidden = true;
   if (view?.kind === 'volc') { stopLive(); playVolc(view); img.hidden = !!volc?.up; $('rtc').hidden = !!volc?.up; return; }
   stopVolc();
   if (view?.kind === 'hls') { playLive(view.src); img.hidden = true; $('rtc').hidden = true; return; }
@@ -104,6 +172,7 @@ function stopVolc() {
 // HLS runs a few seconds behind the server; the caption waits the same so it stays with her mouth.
 const liveLag = () => {
   if (!liveShown()) return 0;
+  if (simli.ready) return 0;
   if (volc?.up) return 300;
   const l = hls ? hls.latency : 0;
   return Math.min(15000, Math.max(0, (Number.isFinite(l) && l > 0 ? l : 4) * 1000));
@@ -126,15 +195,17 @@ function paintLine(line, fresh) {
   const seen = line.seen;
   $('replyTo').innerHTML = asked ? t('回复 <b>{who}</b>：{text}', { who: esc(asked.who), text: esc(asked.request ? t('点了「{a}」', { a: t(asked.request) }) : asked.text) })
     : seen ? t(seen.who ? '刷到{src} <b>{who}</b>：{text}' : '刷到{src}：{text}', { src: t(seen.src), who: esc(seen.who), text: esc(seen.text) }) : '';
+  simli.perform(line, fresh);
   if (!fresh) { el.textContent = text; return; }
+  live2d.perform(line);
   if (line.action) showMove(line.action);
   const total = line.durationMs || Math.max(2000, text.length * 120);
   const step = Math.min(70, Math.max(25, total * 0.8 / Math.max(1, text.length)));
   let i = 0;
   el.textContent = '';
   typing = setInterval(() => { el.textContent = text.slice(0, ++i); if (i >= text.length) clearInterval(typing); }, step);
-  if (sound && line.audio && !liveShown()) { player.src = line.audio; player.play().catch(() => {}); }
-  if (line.bgm?.url) {
+  if (sound && line.audio && !liveShown() && room?.avatar?.kind !== 'simli') { player.src = line.audio; player.play().catch(() => {}); }
+  if (line.bgm?.url && room?.avatar?.kind !== 'simli') {
     if (!line.action) showMove('♪ ' + line.bgm.title);
     if (sound) { songPlayer.src = line.bgm.url; songPlayer.volume = 0.32; songPlayer.play().catch(() => {}); }
   }
@@ -298,10 +369,14 @@ $('goBtn').onclick = () => {
 
 function setSound(on) {
   sound = on;
+  simli.setSound(on);
+  if (on && simli.ready) $('simliAudio').play().catch(() => {});
+  if (on && room?.avatar?.kind === 'live2d') live2d.resumeAudio().catch(error => console.warn('avatar audio', error?.message || error));
   if (!on) songPlayer.pause();
   $('soundBtn').dataset.i18n = on ? '关声音' : '开声音';
   $('soundBtn').textContent = t($('soundBtn').dataset.i18n);
   $('soundBtn').setAttribute('aria-pressed', String(on));
+  if (room?.avatar?.kind === 'simli') { player.pause(); return; }
   if (volc?.up) return volcAudio(on);
   if (liveShown()) { video().muted = !on; if (on) video().play().catch(() => {}); return; }
   if (!on) player.pause();
@@ -319,3 +394,4 @@ $('langBtn').onclick = () => {
 applyStatic();
 showLang();
 refreshMe();
+window.addEventListener('pagehide', event => { if (!event.persisted) { live2d.destroy(); void simli.destroy(); } player.pause(); songPlayer.pause(); });

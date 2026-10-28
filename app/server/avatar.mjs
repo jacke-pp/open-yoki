@@ -14,6 +14,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { plainText } from './voice.mjs';
+import { live2dConfig } from './live2d.mjs';
+import { simliPublicConfig } from './simli.mjs';
 
 // Each stage is one complete picture of her in that stage's outfit and place (clothes pasted onto a face look fake). The page shows public/art/<idol>/looks/<key>.jpg; Vidu gets the same picture uploaded once as an
 // avatar asset (tools/vidu-looks.mjs -> idols/<idol>/vidu-looks.json -> idol.avatar.viduLooks).
@@ -28,6 +30,26 @@ export const lookAvatar = (idol, s, env = {}, key = idol.stages[s]?.key) => idol
 // quiet(): ms since anyone last said anything in the room, so an idle stretch can turn into her drifting off.
 export function createAvatar({ idol, kind = 'mock', voice = null, status, env = {}, room = null, lookDir = null, quiet = () => 0 }) {
   if (kind === 'vidu') return viduAvatar({ idol, voice, status, env, room, lookDir, quiet });
+  if (kind === 'simli') {
+    const simli = simliPublicConfig(env);
+    const local = mockAvatar({ idol, voice, status, lookDir });
+    status?.('avatar', simli.configured, simli.configured ? undefined : 'Simli credentials missing');
+    return { ...local, kind: 'simli', view: () => ({ ...local.view(), kind: 'simli', simli }) };
+  }
+  if (kind === 'live2d') {
+    const live2d = live2dConfig(idol, env);
+    const local = mockAvatar({ idol, voice, status, lookDir });
+    let cue = null, sequence = 0;
+    const move = action => { if (live2d.motions[action]) cue = { id: ++sequence, action }; };
+    const notice = action => {
+      const available = (action ? [action] : idol.notice || []).filter(name => live2d.motions[name]);
+      if (available.length) move(available[Math.floor(Math.random() * available.length)]);
+    };
+    return {
+      ...local, kind: 'live2d', move, notice,
+      view: () => ({ ...local.view(), kind: 'live2d', live2d, cue }),
+    };
+  }
   return mockAvatar({ idol, voice, status, lookDir });
 }
 

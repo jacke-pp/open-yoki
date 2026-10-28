@@ -1,5 +1,11 @@
 # open-yoki
 
+Optional photorealistic avatar preview: [Simli setup and OBS capture](docs/simli.md).
+
+Optional local backends: use Codex CLI for replies and Live2D for the avatar, with OBS capturing the stage for RTMP.
+Both are opt-in; the existing OpenRouter and Vidu paths remain available.
+See [local provider setup](docs/local-providers.md) for installation, asset licensing, configuration and tests.
+
 [中文](README.md)
 
 An AI live-stream host that runs on one server. She talks on camera with a cloned voice and a real-time digital-human

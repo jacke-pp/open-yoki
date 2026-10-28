@@ -71,8 +71,21 @@
         <img class="still" id="still" alt="" hidden>
         <video class="live" id="liveVideo" playsinline muted hidden></video>
         <div class="live volc" id="volcView" hidden></div>
+        <div class="live live2d" id="live2dView" hidden></div>
+        <video class="live simli-video" id="simliVideo" playsinline autoplay muted hidden></video>
+        <audio id="simliAudio" autoplay hidden></audio>
+        <div class="simli-controls" id="simliControls" hidden>
+          <p id="simliNote"></p>
+          <div class="simli-buttons">
+            <button id="simliConnect" type="button" data-i18n="连接真人形象">Connect avatar</button>
+            <button id="simliDisconnect" type="button" data-i18n="断开" disabled>Disconnect</button>
+          </div>
+          <p id="simliStatus" role="status" aria-live="polite"></p>
+        </div>
+        <p class="connecting avatar-error" id="live2dError" role="status" hidden></p>
         <p class="connecting" id="rtc" hidden data-i18n="画面接入中…">Connecting the picture…</p>
         <div class="move" id="moveTag" hidden></div>
+        <p class="model-credit" id="live2dCredit" hidden></p>
         <div class="caption" aria-live="polite">
           <p class="reply-to" id="replyTo"></p>
           <p class="line" id="line"></p>

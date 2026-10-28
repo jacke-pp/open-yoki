@@ -2,7 +2,7 @@
 // Square feed and the host herself (mouth, voice, avatar, heart). Which host is `IDOL=<folder>` under idols/
 // (default example). Each route (model, voice, avatar, chat) keeps its own status and fails on its own: a dead voice
 // key never stops the chat, a dead model never stops the picture.
-//   AVATAR=mock|vidu  who draws her face (mock = her still picture + effects, for local work without Vidu)
+//   AVATAR=mock|vidu|live2d|simli  cloud video, a local Live2D model, or a still picture
 //   ON_AIR=on|off     override the host's schedule (on for local testing)
 //   MODE=show|test    show (default) runs the real schedule; test forces her on air and opens /api/test/* controls
 // Every key comes from the environment (see .env.example); nothing is read from key files here.
@@ -12,8 +12,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import { createWorld, MOODS, whoOf } from './world.mjs';
-import { createBrain, openrouter, deepseek, withBackup, diaryPrompt, fitLength, MODEL, takeInner } from './brain.mjs';
+import { createBrain, diaryPrompt, fitLength, takeInner } from './brain.mjs';
 import { createAvatar } from './avatar.mjs';
+import { createReplyProvider } from './model-provider.mjs';
+import { createSimliService, isLocalSimliRequest, SimliError } from './simli.mjs';
 import { createFiller } from './filler.mjs';
 import { createHeart, claudeRunner, fallbackRunner } from './heart.mjs';
 import { dsRunner } from './heartds.mjs';
@@ -114,9 +116,9 @@ export async function start(env = process.env) {
   const memes = createMemes({ dir: dataDir });
   const status = (r, ok, err) => { routes[r] = { ...routes[r], ok, at: Date.now(), err: ok ? undefined : err }; };
 
-  const orKey = env.OPENROUTER_API_KEY || null;
+  const reply = createReplyProvider({ env, idol });
   const falKey = env.FAL_KEY || null;
-  routes.model.on = !!orKey && env.MODEL_OFF !== '1';
+  routes.model.on = reply.enabled;
   // Voice: her Doubao voice when its key and voice id are there, else fal MiniMax as the fallback.
   const volcKey = env.VOLC_API_KEY || null;
   const dv = idol.avatar.doubao ? { ...idol.avatar.doubao, voiceId: env.DOUBAO_VOICE_ID || idol.avatar.doubao.voiceId } : null;
@@ -129,11 +131,8 @@ export async function start(env = process.env) {
   const voice = stageVoice;
   // With a DeepSeek key the mouth talks to DeepSeek directly (thinking off, MOUTH_DS model) and reads a page of facts
   // (brain.mjs factFor, idol.mouth.direct); OpenRouter's main model backs it up. MOUTH_DIRECT=0 uses OpenRouter only.
-  const mouthDirect = !!env.HEART_KEY_DS && env.MOUTH_DIRECT !== '0' && !!idol.mouth?.direct;
-  const ask = !routes.model.on ? async () => { throw new Error('model off'); }
-    : mouthDirect ? withBackup(deepseek({ key: env.HEART_KEY_DS, model: env.MOUTH_DS || 'deepseek-flash' }), openrouter({ key: orKey, model: idol.models?.main || MODEL }), { mainMs: idol.models?.mainMs || 3500 })
-    : idol.models ? withBackup(openrouter({ key: orKey, model: idol.models.main }), openrouter({ key: orKey, model: idol.models.backup }), { mainMs: idol.models.mainMs })
-    : openrouter({ key: orKey });
+  const mouthDirect = reply.direct;
+  const ask = reply.ask;
 
   let live = null;
   const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -143,6 +142,7 @@ export async function start(env = process.env) {
   const room = env.AVATAR === 'vidu' && env.WATCH !== 'relay' && rtcApp && rtcKey ? createVolcRoom({ appId: rtcApp, appKey: rtcKey, roomId: env.RTC_ROOM || `lh-${String(idol.short || idol.id).toLowerCase()}-${mode}` }) : null;
   let heardAt = Date.now();              // last time anyone in the room said something; a long quiet lets her drift off
   const avatar = createAvatar({ idol, kind: env.AVATAR || 'mock', voice, status, env, room, lookDir: path.join(ROOT, 'public', 'art', idol.id, 'looks'), quiet: () => Date.now() - heardAt });
+  const simli = avatar.kind === 'simli' ? createSimliService({ env }) : null;
   // Binance Square feed (square.mjs): on once <data>/square.json holds Square's RTMP address and key.
   const chrome = env.SQUARE_CHROME || env.CHROMIUM_PATH || (fs.existsSync('/opt/google/chrome/chrome') ? '/opt/google/chrome/chrome' : undefined);
   // Square's own count of her room and who walks in (POST /api/square/room).
@@ -261,7 +261,7 @@ export async function start(env = process.env) {
   let openPending = false;   // on air, hello not said yet (keepOpen)
   const schedule = createSchedule({ windows: idol.schedule, tz, force: env.ON_AIR || (mode === 'test' ? 'on' : null), extra: extraShow });
 
-  // One line: the subtitle goes out to every page at once, the avatar performs it (mock: the page plays the mp3 and the
+  // One line: the subtitle goes out to every page at once, the avatar performs it (mock/live2d/simli: the page plays the mp3 and the
   // action effect; vidu: the line streams into the RTC picture), then a short breath before the next one.
   async function speak(line, e) {
     const id = randomBytes(6).toString('hex');
@@ -279,7 +279,7 @@ export async function start(env = process.env) {
   }
   async function say(line, e, id) {
     const said = plainText(line.text);
-    if (avatar.kind === 'mock') {
+    if (avatar.kind === 'mock' || avatar.kind === 'live2d' || avatar.kind === 'simli') {
       const r = await avatar.perform({ ...line, text: said, id, withVoice: live.viewers > 0 });
       world.say({ text: line.text, face: line.face, action: line.action, tone: line.tone, bgm: line.bgm, seen: seenOf(e), audio: r.audio, durationMs: r.durationMs, kind: e.kind, replyTo: e.kind === 'chat' ? e.chatId : null });
       await sleep(r.durationMs + (r.audio ? 1200 : 0));
@@ -452,7 +452,7 @@ export async function start(env = process.env) {
   // What Binance is pushing, from her heart's home (xlearn keeps the official list, she keeps her own)
   const pushes = heartHome && !scratch ? createPushTalk({ dir: path.join(heartHome, '币安在推') }) : null;
   const brain = createBrain({ idol, world, ask, speak, direct: mouthDirect, memory, memes, news, learned, posts, today, pushes, market, pageOf,
-    act: async line => { avatar.move?.(line.action); if (showOpen && line.inner) herLines.push(`（心里：${line.inner}，没说话）`); await sleep(6000); }, viewers: viewersNow, alone: () => !!square?.live, heart: () => heart?.note(), onAir: () => schedule.onAir() && !openPending, status, idleMs: Number(env.IDLE_MS || idol.idleMs || 60000) });
+    act: async line => { avatar.move?.(line.action); if (showOpen && line.inner) herLines.push(`（心里：${line.inner}，没说话）`); await sleep(6000); }, viewers: viewersNow, alone: () => !!square?.live, heart: () => heart?.note(), onAir: () => schedule.onAir() && !openPending, status, idleMs: Number(env.IDLE_MS || idol.idleMs || 60000), timeoutMs: reply.timeoutMs, longTimeoutMs: reply.longTimeoutMs });
 
   // Going on and off air: open the avatar session (Vidu bills from here) and say hello; say goodbye, then close it.
   // Square watches the whole show once the feed is set up, so she stays connected for it (it wants a steady stream).
@@ -622,6 +622,22 @@ export async function start(env = process.env) {
     const ip = req.headers['x-real-ip'] || req.socket.remoteAddress;
     const fromReader = () => keyOk(req.headers['x-square-key'], ingestKey);   // the ops scripts, with <data>/square-ingest.key
     try {
+      if (p === '/api/simli/session') {
+        if (!isLocalSimliRequest(req)) return json(res, 403, { error: 'Simli trials are only available in the local operator browser' });
+        if (req.method !== 'POST' && req.method !== 'DELETE') { res.setHeader('Allow', 'POST, DELETE'); return json(res, 405, { error: 'Use POST or DELETE for a Simli session' }); }
+        if (!simli) return json(res, 409, { error: 'The Simli avatar is not selected' });
+        if (!/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] || '')) return json(res, 415, { error: 'Send a JSON request' });
+        const body = await readBody(req, 1024);
+        if (!body || typeof body !== 'object' || Array.isArray(body)) return json(res, 400, { error: 'Send a JSON object' });
+        if (req.method === 'DELETE') return json(res, 200, simli.release(body.leaseId));
+        const controller = new AbortController(), cancel = () => { if (!res.writableEnded) controller.abort(); };
+        req.once('aborted', cancel); res.once('close', cancel);
+        try {
+          const session = await simli.create({ signal: controller.signal });
+          if (!res.destroyed) return json(res, 200, session);
+        } finally { req.off('aborted', cancel); res.off('close', cancel); }
+        return;
+      }
       if (p === '/api/state') {
         const snap = live.current();
         const headers = { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' };
@@ -641,13 +657,13 @@ export async function start(env = process.env) {
       // from outside (the proxy sets X-Real-IP) only the on/off parts; voice id, credits and spend stay on the box
       if (p === '/api/health') return json(res, 200, ((h) => req.headers['x-real-ip'] ? (({ voice, viduCredits, modelSpend, model, ...pub }) => pub)(h) : h)({
         mode, viewers: live.viewers, stage: STAGES[world.w.stage]?.name, lastLineAt: world.w.line?.at || null,
-        queue: brain.queue.length, routes, model: idol.models?.main || MODEL, avatar: avatar.kind, viduCredits: credits.n, viduCreditsLow: credits.n != null && credits.n < Number(env.VIDU_WARN_CREDITS || 1800),
+        queue: brain.queue.length, routes, modelProvider: reply.provider, model: reply.model, avatar: avatar.kind, viduCredits: credits.n, viduCreditsLow: credits.n != null && credits.n < Number(env.VIDU_WARN_CREDITS || 1800),
         square: square ? { configured: square.configured(), live: square.live, online: squareRoom.online, pv: squareRoom.pv, peak: squareRoom.peak } : null,
         radio: radio ? { wanted: radio.wanted(), on: radio.on, live: radio.live, answered: radio.answered, queue: radio.queue } : null,
         x: xClient ? { post: xClient.configured.user, read: xClient.configured.read, replies: !!xr } : null,
-        heart: !!heart, onAir: schedule.info(),
+        heart: !!heart, onAir: schedule.info(), ...(simli && isLocalSimliRequest(req, { requireOrigin: false }) ? { simli: simli.health() } : {}),
         voice: voice ? { model: voice.provider === 'doubao' ? doubaoResource(voice.voiceId) : VOICE.model, charsToday: voice.used, capChars: voice.dailyChars, ...(voice.provider === 'doubao' ? { rmbToday: +voice.rmb.toFixed(3) } : { usdToday: +voice.usd.toFixed(3) }) } : null,
-        modelSpend: { calls: brain.spend.calls, fails: brain.spend.fails, usd: +brain.spend.usd.toFixed(4) },
+        modelSpend: { calls: brain.spend.calls, fails: brain.spend.fails, usd: reply.costKnown ? +brain.spend.usd.toFixed(4) : null, costKnown: reply.costKnown, billing: reply.provider === 'codex' ? 'codex' : 'api' },
       }));
       if (p === '/api/diary') {
         const d = world.w.diary.find(x => x.date === url.searchParams.get('date')) || world.w.diary[0];
@@ -840,6 +856,7 @@ export async function start(env = process.env) {
       if (serveFile(res, path.join(ROOT, 'public'), rel, rel.startsWith('art/') && !rel.endsWith('.json') ? 'public, max-age=86400' : 'no-cache')) return;
       json(res, 404, { error: 'not found' });
     } catch (err) {
+      if (err instanceof SimliError) { if (!res.destroyed) return json(res, err.status, { error: err.message }); return; }
       if (err instanceof AuthError) return json(res, 400, { error: err.message });
       if (err.message === 'bad json') return json(res, 400, { error: '请求格式不对' });
       if (err.message === 'too large') return;
@@ -852,8 +869,11 @@ export async function start(env = process.env) {
   brain.start();
   // Waits for the Vidu hangup to go out: Vidu bills by connected time, so exiting before it would leave her billing.
   const shutdown = async () => {
-    world.save(); memory.save(); brain.stop(); market?.stop(); live.stop(); square?.stop(); radio?.close().catch?.(() => {}); clearInterval(diaryTimer); clearInterval(saveTimer); clearInterval(scheduleTimer); server.close();
-    await Promise.race([Promise.all([relay?.stop(), avatar.close(), outbox?.flush()]).catch(() => {}), sleep(3000)]);
+    world.save(); memory.save();
+    simli?.close();
+    const brainStopped = brain.stop(), repliesClosed = reply.close();
+    market?.stop(); live.stop(); square?.stop(); radio?.close().catch?.(() => {}); clearInterval(diaryTimer); clearInterval(saveTimer); clearInterval(scheduleTimer); server.close();
+    await Promise.race([Promise.all([brainStopped, repliesClosed, relay?.stop(), avatar.close(), outbox?.flush()]).catch(() => {}), sleep(3000)]);
   };
   return { server, world, brain, live, avatar, schedule, shutdown, routes };
 }

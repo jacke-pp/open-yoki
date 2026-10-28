@@ -418,6 +418,7 @@ export function createBrain({ idol, world, ask, speak, direct: directOn = false,
   // what her heart (heart.mjs) last noted: her mood, why, what she is on about, how she feels about the people here
   const heartLine = (n, e) => { n = n && worn(n, (world.w.talk || []).slice(0, 10).map(t => t.text)); if (n && e?.worn?.length) n = n.split('\n').filter(l => !/^\s*盘上[:：]/.test(l) || !wornTopics([l, l, l]).some(k => e.worn.includes(k))).join('\n'); return n ? `\n【你此刻心里（只有你自己知道，不要念出来，让它决定你说话的味道）】\n${n}` : ''; };
   let queue = [], running = false, current = null, lastSpoke = now(), lastTalked = now(), wake = null, lastHeard = now();   // lastHeard: last comment or 点播
+  let loopPromise = null;
   const spend = { usd: 0, calls: 0, fails: 0 };
   const persona = personaOf(idol);
   // her mouth when the heart is on: who she is in two lines, real hosts' lines, the same reply format
@@ -517,6 +518,7 @@ export function createBrain({ idol, world, ask, speak, direct: directOn = false,
       const messages = direct ? [{ role: 'system', content: personaOf(idol, typeof idol.mouth.direct === 'function' ? idol.mouth.direct(rand) : idol.mouth.direct) + `\n\n画面里的你：${idol.stages[0].look}。` + (market ? market.lineFor(e) : '') + memoryFor(memory, e, rand, pageOf) + roomFor(world.w, e, now()).replace(/\n接着上面的聊[^\n]*$/, '') + soulFor(idol, memory, e, now(), rand) + lifeFor(e) + moodLine(e) + heartLine(note, e) }, { role: 'user', content: p.text }]
         : [{ role: 'system', content: personaFor(note) + '\n' + contextFor(idol) + (market ? market.lineFor(e) : '') + memoryFor(memory, e, rand, pageOf) + (['chat', 'request', 'idle'].includes(e.kind) ? roomFor(world.w, e, now()) : '') + soulFor(idol, memory, e, now(), rand) + lifeFor(e) + moodLine(e) + heartLine(note, e) + examplesFor(e, note) + ticsFor() + waitingFor(world.w, now()) + (p.long ? '\n这次是长段感言，150 到 250 字，宁短勿长，可以分几句。' : '\n每次只说一段话，60 字以内（英文 40 词以内）。') }, { role: 'user', content: p.text + recentFor(world.w) }];
       let r = await ask(messages, { long: p.long, signal: abort.signal });
+      if (abort.signal.reason === 'stopped') return null;
       spend.usd += r.cost; spend.calls++;
       let inner = takeInner(r.text); r = { ...r, text: inner.text };
       // Saying the same thing as a few lines ago is what makes her sound like a bot; one rewrite when it happens.
@@ -526,6 +528,7 @@ export function createBrain({ idol, world, ask, speak, direct: directOn = false,
         try { const r2 = await ask(messages, { long: p.long, signal: abort.signal }); spend.usd += r2.cost; spend.calls++; inner = takeInner(r2.text); r = { ...r2, text: inner.text }; } catch {}
         console.log(`repeat "${again}" rewritten${repeatOf(r.text, world.w.recent.slice(0, 12)) ? ', still repeats' : ''}`);
       }
+      if (abort.signal.reason === 'stopped') return null;
       const sg = takeSong(r.text);
       const bet = takeCall(sg.text);
       if (asksCall && bet.call) {
@@ -549,7 +552,7 @@ export function createBrain({ idol, world, ask, speak, direct: directOn = false,
       status?.('model', true);
       line.source = 'model';
     } catch (err) {
-      if (abort.signal.reason === 'preempted') return null;
+      if (abort.signal.reason === 'preempted' || abort.signal.reason === 'stopped') return null;
       spend.fails++;
       const why = String(err.message || err).slice(0, 120);
       status?.('model', false, why);
@@ -635,20 +638,21 @@ export function createBrain({ idol, world, ask, speak, direct: directOn = false,
   }
 
   async function loop() {
-    running = true;
     while (running) {
       const live = onAir();
       if (!live) { showAt = null; segDone.clear(); } else if (showAt == null) showAt = now();
       if (live) noticeJoin();
       let e = next(live);
       if (!e && live && (viewers() > 0 || alone()) && now() - lastSpoke > idleMs) e = idleEvent();   // alone(): on Square she keeps going for whoever scrolls past
-      if (!e) { await new Promise(r => { wake = r; setTimeout(r, 2000); }); wake = null; continue; }
+      if (!e) { await new Promise(r => { const timer = setTimeout(r, 2000); wake = () => { clearTimeout(timer); r(); }; }); wake = null; continue; }
       const line = await think(e);
+      if (!running) break;
       if (!line) { enqueue(e); continue; }       // preempted: the bigger event goes first, this one waits its turn
       current.speaking = true;
       if (line.silent) { try { await act(line, e); } catch (err) { console.error('act failed', err); } }
       else try { await speak(line, e); } catch (err) { console.error('speak failed', err); }
       current = null;
+      if (!running) break;
       requeueSkipped(e, line);
       // A silent beat does not restart the idle clock when the idol caps dead air: the next quiet beat comes right away.
       if (!line.silent) lastTalked = now();
@@ -656,7 +660,25 @@ export function createBrain({ idol, world, ask, speak, direct: directOn = false,
     }
   }
 
-  return { add, start() { if (!running) loop(); }, stop() { running = false; wake?.(); }, get queue() { return queue; }, get mood() { return mood; }, spend, persona, idleEvent };
+  return {
+    add,
+    start() {
+      if (!loopPromise) {
+        running = true;
+        // Assign the promise before starting work, so an immediate stop can wait for all cleanup.
+        loopPromise = Promise.resolve().then(loop).finally(() => { running = false; current = null; wake = null; loopPromise = null; });
+      }
+      return loopPromise;
+    },
+    stop() {
+      running = false;
+      if (current && !current.speaking) current.abort.abort('stopped');
+      wake?.();
+      // Callers that need graceful shutdown can await an in-flight model/process cleanup.
+      return loopPromise || Promise.resolve();
+    },
+    get queue() { return queue; }, get mood() { return mood; }, spend, persona, idleEvent,
+  };
 }
 
 export const diaryPrompt = (idol, w, d) => `【写日记】今天（${d.date}）结束了，以${idol.name}的口吻写一篇今天的日记，150 到 250 字，像真人写的私密日记，按你的性格写。写今天直播里的人和事、你自己琢磨的事。别编价格和行情数字。
