@@ -55,7 +55,7 @@ Two parts first. The **heart** runs in the background all the time: it decides h
 
 **Finding problems**
 
-- **Read the heart's record.** Count the "right now" notes from one night: how many are her own feelings and thoughts, and how many are hosting tips and reminders to herself ("greet them first", "don't let it go quiet", "don't lecture"). Many of the second kind means the heart turned into a director or a proofreader, and the mouth comes out sounding like a presenter.
+- **Read the heart's record.** Count the "right now" notes from one night: how many are her own feelings and thoughts, and how many are hosting tips and reminders to herself ("greet them first", "don't let it go quiet", "don't lecture"). Many of the second kind mean the heart turned into a director or a proofreader, and the mouth comes out sounding like a presenter.
 - **Is the heart growing?** Over a week, did her view of herself, her opinions, her notes on people change? Are the diary entries nearly identical? How many regulars have a note?
 - **Capture one real request.** Start [capture](../tools/debug/capture/), point the heart or the mouth at it for one beat, and look at what really went out: how long the system prompt is, how it begins, how many tools are attached, the temperature and thinking settings.
 - **Let a person read it.** Give someone who did not build her a day of her thoughts and her on-air lines and ask "does this sound like a person". When you hear "it feels like AI", do not reach for a new model first.
