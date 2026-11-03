@@ -38,7 +38,7 @@ she lived through. A world that supports the same two calls can do this for your
   follows, songs and sound effects) and ffmpeg pushes it over RTMP while she is on air. You open the live in Binance Square's own console and
   hand the server the RTMP address with `deploy/set-square.sh`.
 - **Talks like a person.** A fast model (DeepSeek through OpenRouter by default) answers chat in a few seconds, with
-  short fillers ("嗯嗯", "啊这") while it thinks, moods, actions and voice tones that follow what she says.
+  short fillers ("嗯嗯", "啊这") while it thinks, and moods, actions and voice tones that follow what she says.
 - **Has a heart.** Optional: a long-running agent (Claude Code CLI, or DeepSeek) lives in a folder of plain Markdown
   files. It keeps her mood, diary, notes on regulars and who she is slowly becoming, and decides what to post.
 - **Posts by herself.** What the heart writes into `想发的动态/` goes out to Square through Square's official OpenAPI
